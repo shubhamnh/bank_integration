@@ -4,125 +4,102 @@
 
 from __future__ import unicode_literals
 
-import frappe
-from frappe.utils import add_days
+import csv
+import os
+from datetime import datetime, timedelta
 
+def read_csv(file_path):
+    with open(file_path, mode='r') as file:
+        reader = csv.DictReader(file)
+        return [row for row in reader]
 
 def reconcile_with_payment_entries(transaction, account):
-    transaction = frappe._dict(transaction)
+    transaction = dict(transaction)
 
     filters = {
-        "docstatus": 1,
-        "reference_no": ["Like", "%" + transaction.reference_number.lstrip("0")],
+        "reference_no": transaction["reference_number"].lstrip("0"),
         "reference_date": [
-            "Between",
-            [
-                add_days(transaction.date, -7),
-                add_days(transaction.date, 1),
-            ],
+            (datetime.strptime(transaction["date"], "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d"),
+            (datetime.strptime(transaction["date"], "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d"),
         ],
-        "ifnull(clearance_date, '')": "",
+        "clearance_date": "",
     }
 
-    if transaction.withdrawal > 0:
+    if float(transaction["withdrawal"]) > 0:
         filters["paid_from"] = account
-        filters["paid_amount"] = transaction.withdrawal
-    elif transaction.deposit > 0:
+        filters["paid_amount"] = float(transaction["withdrawal"])
+    elif float(transaction["deposit"]) > 0:
         filters["paid_to"] = account
-        filters["paid_amount"] = transaction.deposit
+        filters["paid_amount"] = float(transaction["deposit"])
 
-    payment_entry = frappe.get_all(
-        "Payment Entry",
-        filters=filters,
-        fields=["name", "paid_amount"],
-    )
+    payment_entries = read_csv('payment_entries.csv')
 
-    if len(payment_entry) != 1:
+    matching_entries = [
+        entry for entry in payment_entries
+        if all(filters[key] == entry[key] for key in filters)
+    ]
+
+    if len(matching_entries) != 1:
         return 0
 
-    transaction_doc = frappe.get_doc("Bank Transaction", transaction.name)
-
-    transaction_doc.append(
-        "payment_entries",
+    transaction["payment_entries"] = [
         {
             "payment_document": "Payment Entry",
-            "payment_entry": payment_entry[0].name,
-            "allocated_amount": payment_entry[0].paid_amount,
-        },
-    )
-    transaction_doc.save(ignore_permissions=True)
-    transaction_doc.update_allocations()
+            "payment_entry": matching_entries[0]["name"],
+            "allocated_amount": matching_entries[0]["paid_amount"],
+        }
+    ]
 
     return 1
 
-
 def reconcile_with_journal_entries(transaction, account):
-    journal_entries = frappe.get_all(
-        "Journal Entry",
-        filters={
-            "docstatus": 1,
-            "cheque_no": ["Like", "%" + transaction.reference_number.lstrip("0")],
-            "cheque_date": [
-                "Between",
-                [
-                    add_days(transaction.date, -7),
-                    add_days(transaction.date, 1),
-                ],
-            ],
-            "ifnull(clearance_date, '')": "",
-        },
-        fields=["name", "'Journal Entry' as doctype"],
-    )
+    journal_entries = read_csv('journal_entries.csv')
 
-    for journal_entry in journal_entries:
-        filters = {
-            "parenttype": journal_entry["doctype"],
-            "parent": journal_entry["name"],
-            "account": account,
-        }
-        if transaction.withdrawal > 0:
-            filters["credit_in_account_currency"] = transaction.withdrawal
-        else:
-            filters["debit_in_account_currency"] = transaction.deposit
-        journal_entry_account = frappe.get_all(
-            "Journal Entry Account",
-            filters=filters,
-        )
-        if not journal_entry_account:
-            continue
-        else:
-            transaction_doc = frappe.get_doc("Bank Transaction", transaction.name)
+    matching_entries = [
+        entry for entry in journal_entries
+        if entry["cheque_no"].lstrip("0") == transaction["reference_number"].lstrip("0")
+        and (datetime.strptime(entry["cheque_date"], "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d") <= transaction["date"] <= (datetime.strptime(entry["cheque_date"], "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        and entry["clearance_date"] == ""
+    ]
 
-            transaction_doc.append(
-                "payment_entries",
-                {
-                    "payment_document": "Journal Entry",
-                    "payment_entry": journal_entry["name"],
-                    "allocated_amount": transaction.withdrawal
-                    if transaction.withdrawal > 0
-                    else transaction.deposit,
-                },
+    for journal_entry in matching_entries:
+        journal_entry_accounts = read_csv('journal_entry_accounts.csv')
+        matching_accounts = [
+            account_entry for account_entry in journal_entry_accounts
+            if account_entry["parenttype"] == journal_entry["doctype"]
+            and account_entry["parent"] == journal_entry["name"]
+            and account_entry["account"] == account
+            and (
+                (float(transaction["withdrawal"]) > 0 and float(account_entry["credit_in_account_currency"]) == float(transaction["withdrawal"]))
+                or (float(transaction["deposit"]) > 0 and float(account_entry["debit_in_account_currency"]) == float(transaction["deposit"]))
             )
-            transaction_doc.save(ignore_permissions=True)
-            transaction_doc.update_allocations()
+        ]
 
-            return 1
+        if not matching_accounts:
+            continue
+
+        transaction["payment_entries"] = [
+            {
+                "payment_document": "Journal Entry",
+                "payment_entry": journal_entry["name"],
+                "allocated_amount": float(transaction["withdrawal"]) if float(transaction["withdrawal"]) > 0 else float(transaction["deposit"]),
+            }
+        ]
+
+        return 1
     return 0
 
-
-@frappe.whitelist()
 def reconcile_transactions(uid, bank_account):
-    account = frappe.get_value("Bank Account", bank_account, "account")
-    transactions = frappe.get_all(
-        "Bank Transaction",
-        filters={
-            "docstatus": 1,
-            "unallocated_amount": [">", "0"],
-            "bank_account": bank_account,
-            "ifnull(reference_number, '')": ("!=", ""),
-        },
-        fields=["name", "withdrawal", "deposit", "reference_number", "date"],
-    )
+    account = bank_account
+    transactions = read_csv('bank_transactions.csv')
+
+    transactions = [
+        transaction for transaction in transactions
+        if transaction["docstatus"] == "1"
+        and float(transaction["unallocated_amount"]) > 0
+        and transaction["bank_account"] == bank_account
+        and transaction["reference_number"] != ""
+    ]
 
     count = 0
 
@@ -132,11 +109,4 @@ def reconcile_transactions(uid, bank_account):
         elif reconcile_with_journal_entries(transaction, account):
             count += 1
 
-    frappe.publish_realtime(
-        "auto_reconcile",
-        {
-            "uid": uid,
-            "count": count,
-        },
-        user=frappe.session.user,
-    )
+    print(f"Reconciled {count} transactions.")

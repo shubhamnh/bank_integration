@@ -2,18 +2,15 @@
 # Copyright (c) 2018, Resilient Tech and contributors
 # For license information, please see license.txt
 
-import frappe
-import bank_integration
-from frappe.utils.file_manager import save_file
-
-# Selenium Imports
+import pickle
+import os
+import json
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.common.by import By
-
 
 class BankAPI:
     def __init__(
@@ -34,7 +31,7 @@ class BankAPI:
         self.logged_in = logged_in
         self.doctype = doctype
         self.docname = docname
-        self.uid = uid or frappe.utils.random_string(7)
+        self.uid = uid or self.random_string(7)
         self.cache_key = "bank_" + self.uid
         self.data = data
 
@@ -58,24 +55,15 @@ class BankAPI:
     def get_options(self):
         options = Options()
         options.add_argument("window-size=990,1200")
-        if not frappe.conf.developer_mode:
-            options.add_argument("--headless")
-            options.add_experimental_option("w3c", False)
-
+        options.add_argument("--headless")
+        options.add_experimental_option("w3c", False)
         return options
 
     def emit_js(self, js):
-        js = "if (cur_frm && cur_frm._uid === '{0}') {{ {1} }}".format(self.uid, js)
-        frappe.publish_realtime(
-            "eval_js",
-            js,
-            user=frappe.session.user,
-            doctype=self.doctype,
-            docname=self.docname,
-        )
+        pass
 
     def show_msg(self, msg):
-        self.emit_js("frappe.update_msgprint(`{0}`);".format(msg))
+        pass
 
     def get_resume_info(self):
         return {
@@ -84,18 +72,18 @@ class BankAPI:
         }
 
     def resume_session(self):
-        cached = frappe.cache().get_value(self.cache_key, user=frappe.session.user)
+        cached = self.get_cache(self.cache_key)
         if not cached:
             self.throw("Unable to find session info in cache")
 
-        self.data = frappe._dict(cached["data"] or {})
-        resume_info = frappe._dict(cached["resume_info"])
+        self.data = cached["data"]
+        resume_info = cached["resume_info"]
 
         self.br = webdriver.Remote(
-            command_executor=resume_info.executor_url, options=self.get_options()
+            command_executor=resume_info["executor_url"], options=self.get_options()
         )
         self.br.close()
-        self.br.session_id = resume_info.session_id
+        self.br.session_id = resume_info["session_id"]
 
     def wait_until(self, ec, timeout=None, throw=True):
         try:
@@ -144,39 +132,42 @@ class BankAPI:
             raise
 
     def throw(self, message, screenshot=False):
-        js = "frappe.hide_msgprint();"
         if screenshot:
-            save_file(
-                "payment_error_{}.png".format(self.uid),
-                self.br.get_screenshot_as_png(),
-                self.doctype,
-                self.docname,
-                is_private=1,
-            )
-
-            frappe.db.commit()
-            js += " if (cur_frm) cur_frm.reload_doc();"
-            message += " (See attached screenshot)"
-
-        self.emit_js(js)
+            self.save_screenshot("payment_error_{}.png".format(self.uid))
         self.logout()
-        frappe.throw(message)
+        raise Exception(message)
 
     def save_for_later(self):
-        frappe.cache().set_value(
+        self.set_cache(
             self.cache_key,
             {"resume_info": self.get_resume_info(), "data": self.data},
-            user=frappe.session.user,
         )
 
-        setattr(bank_integration, self.cache_key, self)
-
     def delete_cache(self):
-        frappe.cache().delete_key(self.cache_key, user=frappe.session.user)
+        self.delete_cache_key(self.cache_key)
 
-        if hasattr(bank_integration, self.cache_key):
-            delattr(bank_integration, self.cache_key)
+    def random_string(self, length):
+        import random
+        import string
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
+    def save_screenshot(self, filename):
+        with open(filename, 'wb') as f:
+            f.write(self.br.get_screenshot_as_png())
+
+    def get_cache(self, key):
+        if os.path.exists(key):
+            with open(key, 'rb') as f:
+                return pickle.load(f)
+        return None
+
+    def set_cache(self, key, value):
+        with open(key, 'wb') as f:
+            pickle.dump(value, f)
+
+    def delete_cache_key(self, key):
+        if os.path.exists(key):
+            os.remove(key)
 
 class AnyEC:
     """Use with WebDriverWait to combine expected_conditions

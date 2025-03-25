@@ -2,30 +2,38 @@
 # Copyright (c) 2018, Resilient Tech and contributors
 # For license information, please see license.txt
 
-from __future__ import unicode_literals
+import csv
+import json
 
-import frappe
-from bank_integration.bank_integration.api import get_bank_api
+def read_csv(file_path):
+    with open(file_path, mode='r') as file:
+        reader = csv.DictReader(file)
+        return [row for row in reader]
 
-from bank_integration.bank_integration.api.hdfc_bank_api import HDFCBankAPI
+def get_bank_api(bank_name, *args, **kwargs):
+    from bank_integration.bank_integration.api.hdfc_bank_api import HDFCBankAPI
+    api_map = {
+        "HDFC Bank": HDFCBankAPI,
+    }
+    return api_map.get(bank_name)(*args, **kwargs)
 
-
-@frappe.whitelist()
 def get_transactions(uid, from_account):
-    bi = frappe.get_doc("Bank Integration Settings", from_account)
-    account_name = frappe.get_value("Bank Account", from_account, "account_name")
-    data = frappe._dict(
-        {
-            "bank_account": from_account,
-            "from_account": account_name,
-            "from_account_no": bi.bank_account_no,
-        }
-    )
+    bi_settings = read_csv('bank_integration_settings.csv')
+    bi = next((entry for entry in bi_settings if entry['bank_account'] == from_account), None)
+    if not bi:
+        raise ValueError("Bank Integration Settings not found for the given account")
+
+    account_name = next((entry['account_name'] for entry in bi_settings if entry['bank_account'] == from_account), None)
+    data = {
+        "bank_account": from_account,
+        "from_account": account_name,
+        "from_account_no": bi['bank_account_no'],
+    }
 
     bank = get_bank_api(
-        bi.bank_name,
-        bi.username,
-        bi.get_password(),
+        bi['bank_name'],
+        bi['username'],
+        bi['password'],
         doctype="Bank Account",
         uid=uid,
         data=data,

@@ -3,11 +3,13 @@
 # For license information, please see license.txt
 
 import time
-
-import frappe
 import hashlib
-from frappe.utils import getdate, today, add_months, add_days, flt
-from frappe.utils.file_manager import save_file
+import csv
+import os
+import pickle
+import json
+import socket
+from datetime import datetime, timedelta
 
 from bank_integration.bank_integration.api.bank_api import BankAPI, AnyEC
 
@@ -123,7 +125,7 @@ class HDFCBankAPI(BankAPI):
 
         self.br.execute_script("return fireOtp();")
 
-        frappe.publish_realtime(
+        self.publish_realtime(
             "get_bank_otp",
             {
                 "mobile_no": mobile_no,
@@ -132,15 +134,12 @@ class HDFCBankAPI(BankAPI):
                 "bank_name": self.bank_name,
                 "logged_in": self.logged_in,
             },
-            user=frappe.session.user,
-            doctype=self.doctype,
-            docname=self.docname,
         )
 
         self.save_for_later()
 
     def process_security_questions(self):
-        frappe.publish_realtime(
+        self.publish_realtime(
             "get_bank_answers",
             {
                 "questions": self.get_question_map(),
@@ -148,9 +147,6 @@ class HDFCBankAPI(BankAPI):
                 "bank_name": self.bank_name,
                 "logged_in": self.logged_in,
             },
-            user=frappe.session.user,
-            doctype=self.doctype,
-            docname=self.docname,
         )
 
         self.save_for_later()
@@ -471,7 +467,7 @@ class HDFCBankAPI(BankAPI):
     def payment_success(self):
         self.switch_to_frame("main_part")
 
-        save_file(
+        self.save_file(
             self.docname + " Online Payment Screenshot.png",
             self.br.get_screenshot_as_png(),
             self.doctype,
@@ -496,25 +492,22 @@ class HDFCBankAPI(BankAPI):
                 or "-"
             ).strip()
 
-        frappe.publish_realtime(
+        self.publish_realtime(
             "payment_success",
             {"ref_no": ref_no, "uid": self.uid},
-            user=frappe.session.user,
-            doctype="Payment Entry",
-            docname=self.docname,
         )
 
-        frappe.db.commit()
+        self.commit()
         self.logout()
 
     def fetch_transactions(self, from_date=None):
         import pandas as pd
 
         def update_transactions(transactions, after_date, bank_account):
-            trans_ids = frappe.get_all(
+            trans_ids = self.get_all(
                 "Bank Transaction",
                 filters=[
-                    ["creation", ">", add_days(after_date, -1)],
+                    ["creation", ">", self.add_days(after_date, -1)],
                     ["bank_account", "=", bank_account],
                 ],
                 fields="transaction_id",
@@ -525,7 +518,7 @@ class HDFCBankAPI(BankAPI):
             for transaction in transactions:
                 for key in ("Withdrawal", "Deposit", "Closing Balance"):
                     if transaction.get(key):
-                        transaction[key] = flt(transaction[key])
+                        transaction[key] = self.flt(transaction[key])
                 transaction["Cheque/Ref. No."] = str(
                     transaction["Cheque/Ref. No."]
                 ).replace(".0", "")
@@ -535,36 +528,35 @@ class HDFCBankAPI(BankAPI):
                 if transaction_id in existing_transactions:
                     continue
 
-                bank_transaction = frappe.get_doc({"doctype": "Bank Transaction"})
+                bank_transaction = self.get_doc({"doctype": "Bank Transaction"})
 
                 bank_transaction.update(
                     {
                         "transaction_id": transaction_id,
-                        "date": getdate(transaction["Date"]),
+                        "date": self.getdate(transaction["Date"]),
                         "description": transaction["Narration"],
-                        "withdrawal": flt(transaction["Withdrawal"]),
-                        "deposit": flt(transaction["Deposit"]),
+                        "withdrawal": self.flt(transaction["Withdrawal"]),
+                        "deposit": self.flt(transaction["Deposit"]),
                         "reference_number": transaction["Cheque/Ref. No."],
-                        "closing_balance": flt(transaction["Closing Balance"]),
+                        "closing_balance": self.flt(transaction["Closing Balance"]),
                         "bank_account": bank_account,
                         "unallocated_amount": abs(
-                            flt(transaction["Deposit"]) - flt(transaction["Withdrawal"])
+                            self.flt(transaction["Deposit"]) - self.flt(transaction["Withdrawal"])
                         ),
                     }
                 )
                 bank_transaction.submit()
                 count += 1
-                closing_balance = flt(transaction["Closing Balance"])
+                closing_balance = self.flt(transaction["Closing Balance"])
 
-            frappe.publish_realtime(
+            self.publish_realtime(
                 "sync_transactions",
                 {
                     "uid": self.uid,
                     "count": count,
                     "closing_balance": closing_balance,
-                    "after_date": add_days(after_date, -1),
+                    "after_date": self.add_days(after_date, -1),
                 },
-                user=frappe.session.user,
             )
 
         self.switch_to_frame("main_part")
@@ -586,8 +578,8 @@ class HDFCBankAPI(BankAPI):
             "Please verify account number in Bank Integration Settings",
         )
 
-        prev_valid_date = add_months(add_days(today(), -getdate().day + 1), -1)
-        if not frappe.db.count(
+        prev_valid_date = self.add_months(self.add_days(self.today(), -self.getdate().day + 1), -1)
+        if not self.count(
             "Bank Transaction",
             filters={
                 "bank_account": self.data.bank_account,
@@ -596,24 +588,24 @@ class HDFCBankAPI(BankAPI):
         ):
             from_date = prev_valid_date
         else:
-            from_date = frappe.get_all(
+            from_date = self.get_all(
                 "Bank Transaction",
                 filters={"bank_account": self.data.bank_account},
                 fields="date",
                 order_by="creation desc",
                 limit=1,
             )[0]["date"]
-            if getdate(from_date) <= getdate(prev_valid_date):
+            if self.getdate(from_date) <= self.getdate(prev_valid_date):
                 from_date = prev_valid_date
-            from_date = add_days(from_date, -1)
+            from_date = self.add_days(from_date, -1)
 
         self.br.find_elements_by_class_name("radio")[1].click()
 
         self.get_element("frmDatePicker", selector_type="id", now=True).send_keys(
-            getdate(from_date).strftime("%d/%m/%Y")
+            self.getdate(from_date).strftime("%d/%m/%Y")
         )
         self.get_element("toDatePicker", selector_type="id", now=True).send_keys(
-            getdate().strftime("%d/%m/%Y")
+            self.getdate().strftime("%d/%m/%Y")
         )
         self.br.execute_script("return formSubmitbytype()")
 
@@ -638,3 +630,66 @@ class HDFCBankAPI(BankAPI):
         transactions.reverse()
 
         update_transactions(transactions, from_date, self.data.bank_account)
+
+    def publish_realtime(self, event, message):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect(("localhost", 12345))
+            s.sendall(json.dumps({"event": event, "message": message}).encode("utf-8"))
+
+    def save_file(self, filename, content, doctype, docname, is_private):
+        with open(filename, "wb") as f:
+            f.write(content)
+
+    def get_all(self, doctype, filters, fields):
+        results = []
+        with open("data.csv", "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                match = True
+                for filter in filters:
+                    if row[filter[0]] != filter[2]:
+                        match = False
+                        break
+                if match:
+                    result = {}
+                    for field in fields.split(","):
+                        result[field] = row[field]
+                    results.append(result)
+        return results
+
+    def get_doc(self, doc):
+        return doc
+
+    def commit(self):
+        pass
+
+    def add_days(self, date, days):
+        return (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=days)).strftime("%Y-%m-%d")
+
+    def add_months(self, date, months):
+        return (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=months*30)).strftime("%Y-%m-%d")
+
+    def today(self):
+        return datetime.today().strftime("%Y-%m-%d")
+
+    def getdate(self, date_str=None):
+        if date_str:
+            return datetime.strptime(date_str, "%Y-%m-%d")
+        return datetime.today()
+
+    def flt(self, value):
+        return float(value)
+
+    def count(self, doctype, filters):
+        count = 0
+        with open("data.csv", "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                match = True
+                for key, value in filters.items():
+                    if row[key] != value:
+                        match = False
+                        break
+                if match:
+                    count += 1
+        return count

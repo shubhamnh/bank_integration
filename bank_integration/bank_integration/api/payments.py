@@ -2,19 +2,35 @@
 # Copyright (c) 2018, Resilient Tech and contributors
 # For license information, please see license.txt
 
-from __future__ import unicode_literals
 import json
+import csv
 
-import frappe
-from bank_integration.bank_integration.api import get_bank_api
+def read_csv(file_path):
+    with open(file_path, mode='r') as file:
+        reader = csv.DictReader(file)
+        return [row for row in reader]
 
-@frappe.whitelist()
+def get_bank_api(bank_name, *args, **kwargs):
+    from bank_integration.bank_integration.api.hdfc_bank_api import HDFCBankAPI
+    api_map = {
+        "HDFC Bank": HDFCBankAPI,
+    }
+    return api_map.get(bank_name)(*args, **kwargs)
+
 def make_payment(docname, uid, data):
-    data = frappe._dict(json.loads(data))
+    data = json.loads(data)
 
-    bi_name = frappe.db.get_value('Bank Account', {'account': data.from_account}, 'name')
-    bi = frappe.get_doc('Bank Integration Settings', bi_name)
-    data.from_account = bi.bank_account_no
+    payment_entries = read_csv('payment_entries.csv')
+    bi_name = next((entry['name'] for entry in payment_entries if entry['account'] == data['from_account']), None)
+    if not bi_name:
+        raise ValueError("Bank Integration Settings not found for the given account")
 
-    bank = get_bank_api(bi.bank_name, bi.username, bi.get_password(), doctype="Payment Entry", docname=docname,
+    bi_settings = read_csv('bank_integration_settings.csv')
+    bi = next((entry for entry in bi_settings if entry['name'] == bi_name), None)
+    if not bi:
+        raise ValueError("Bank Integration Settings not found")
+
+    data['from_account'] = bi['bank_account_no']
+
+    bank = get_bank_api(bi['bank_name'], bi['username'], bi['password'], doctype="Payment Entry", docname=docname,
         uid=uid, data=data)

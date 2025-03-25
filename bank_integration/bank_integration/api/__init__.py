@@ -3,8 +3,7 @@
 # For license information, please see license.txt
 
 import json
-import frappe
-from frappe.utils import cint
+from functools import wraps
 
 from bank_integration.bank_integration.api.hdfc_bank_api import HDFCBankAPI
 
@@ -15,9 +14,15 @@ api_map = {
 def get_bank_api(bank_name, *args, **kwargs):
     return api_map.get(bank_name)(*args, **kwargs)
 
-@frappe.whitelist()
+def custom_whitelist(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+    return wrapper
+
+@custom_whitelist
 def continue_with_otp(otp, bank_name, uid, doctype=None, docname=None, logged_in=0):
-    logged_in = cint(logged_in)
+    logged_in = int(logged_in)
 
     bank = get_bank_api(bank_name, uid=uid, doctype=doctype, docname=docname, logged_in=logged_in, resume=True)
 
@@ -26,10 +31,10 @@ def continue_with_otp(otp, bank_name, uid, doctype=None, docname=None, logged_in
     else:
         bank.continue_payment(otp)
 
-@frappe.whitelist()
+@custom_whitelist
 def continue_with_answers(answers, bank_name, uid, doctype=None, docname=None, logged_in=0):
-    logged_in = cint(logged_in)
-    answers = frappe._dict(json.loads(answers))
+    logged_in = int(logged_in)
+    answers = json.loads(answers)
 
     bank = get_bank_api(bank_name, uid=uid, doctype=doctype, docname=docname, logged_in=logged_in, resume=True)
 
@@ -38,9 +43,9 @@ def continue_with_answers(answers, bank_name, uid, doctype=None, docname=None, l
     else:
         bank.continue_payment(answers=answers)
 
-@frappe.whitelist()
+@custom_whitelist
 def cancel_session(bank_name, uid, logged_in=0):
-    logged_in = cint(logged_in)
+    logged_in = int(logged_in)
 
     bank = get_bank_api(bank_name, uid=uid, logged_in=logged_in, resume=True)
     bank.logout()
